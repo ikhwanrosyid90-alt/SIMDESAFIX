@@ -1,6 +1,8 @@
 import React, { useRef, useState } from 'react';
 import {
+  ArrowDownToLine,
   ArrowRight,
+  ArrowUpFromLine,
   Building2,
   Check,
   Cloud,
@@ -41,10 +43,14 @@ interface DashboardViewProps {
   isGoogleConnected: boolean;
   connectedSpreadsheetTitle: string | null;
   lastSyncedAt: string | null;
+  lastSyncDirection?: 'pull' | 'push' | null;
+  hasUnsyncedChanges?: boolean;
+  unsyncedAreas?: string[];
   onUpdateProfile: (nextProfile: VillageProfile) => void;
   onNavigate: (tab: ActiveTab) => void;
   onQuickAddResident: () => void;
   onGoogleLogin: () => void;
+  onPullNow: () => void;
   onSyncNow: () => void;
   onUploadLogoToDrive?: (dataUrl: string) => void;
 }
@@ -60,10 +66,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   isGoogleConnected,
   connectedSpreadsheetTitle,
   lastSyncedAt,
+  lastSyncDirection = null,
+  hasUnsyncedChanges = false,
+  unsyncedAreas = [],
   onUpdateProfile,
   onNavigate,
   onQuickAddResident,
   onGoogleLogin,
+  onPullNow,
   onSyncNow,
   onUploadLogoToDrive,
 }) => {
@@ -99,7 +109,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     if (!file) return;
     setUploadError(null);
     try {
-      const optimizedUrl = await resizeImageFileToDataUrl(file, 360);
+      const optimizedUrl = await resizeImageFileToDataUrl(file, 240);
       setDraft((prev) => ({ ...prev, logoPemdaUrl: optimizedUrl }));
     } catch (err) {
       setUploadError(
@@ -671,14 +681,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span
                   className={`font-semibold ${
                     isGoogleConnected
-                      ? 'text-emerald-700'
+                      ? hasUnsyncedChanges
+                        ? 'text-amber-700'
+                        : 'text-emerald-700'
                       : googleUserEmail
                       ? 'text-teal-700'
                       : 'text-amber-700'
                   }`}
                 >
                   {isGoogleConnected
-                    ? 'Aktif'
+                    ? hasUnsyncedChanges
+                      ? 'Ada Perubahan Belum Dikirim'
+                      : 'Aktif & Tersinkron'
                     : googleUserEmail
                     ? 'Akun Login · Perlu Aktivasi Sesi'
                     : 'Perlu Masuk Akun Google'}
@@ -694,19 +708,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-slate-500">Sinkronisasi Terakhir</span>
                 <span className="font-mono-tabular text-slate-700">
                   {lastSyncedAt
-                    ? new Date(lastSyncedAt).toLocaleTimeString('id-ID', {
+                    ? `${new Date(lastSyncedAt).toLocaleTimeString('id-ID', {
                         hour: '2-digit',
                         minute: '2-digit',
-                      })
+                        second: '2-digit',
+                      })}${
+                        lastSyncDirection === 'pull'
+                          ? ' (Tarik)'
+                          : lastSyncDirection === 'push'
+                          ? ' (Kirim)'
+                          : ''
+                      }`
                     : '-'}
                 </span>
               </div>
             </div>
 
+            {hasUnsyncedChanges && (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11px] leading-relaxed text-amber-900">
+                <strong>Perubahan lokal belum dikirim ke Sheets:</strong>{' '}
+                {unsyncedAreas.length > 0 ? unsyncedAreas.join(', ') : 'Data aplikasi'}.
+                Klik <strong>Kirim Data</strong> agar HP dan akun lain ikut berubah.
+              </div>
+            )}
+
             <p className="mt-4 text-xs leading-relaxed text-slate-600">
               {googleUserEmail && !isGoogleConnected
-                ? 'Akun Google Anda tetap login setelah halaman dimuat ulang. Klik tombol di bawah untuk menyegarkan sesi sinkronisasi Google Sheets.'
-                : 'Hubungkan spreadsheet Google Sheets desa untuk menyinkronkan data warga, kewilayahan, dan arsip surat secara real-time lintas perangkat desa.'}
+                ? 'Akun Google Anda tetap login setelah halaman dimuat ulang. Klik tombol di bawah untuk menyegarkan sesi dan menarik data terbaru dari Google Sheets.'
+                : 'Gunakan Tarik Data untuk mengambil pembaruan terbaru dari HP/perangkat lain, dan Kirim Data setelah mengedit profil desa, warga, atau wilayah.'}
             </p>
           </div>
 
@@ -724,24 +753,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2.5 text-xs font-medium text-white hover:bg-teal-800"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Aktifkan Sesi Sync
+                Aktifkan Sesi Sync & Tarik Data
               </button>
             ) : (
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={onSyncNow}
-                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2.5 text-xs font-medium text-white hover:bg-teal-800 whitespace-nowrap shrink-0"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  Sinkronkan Sheets
-                </button>
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={onPullNow}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap"
+                  >
+                    <ArrowDownToLine className="h-3.5 w-3.5 text-teal-700" />
+                    Tarik Data
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onSyncNow}
+                    className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-xs font-medium text-white whitespace-nowrap ${
+                      hasUnsyncedChanges
+                        ? 'bg-amber-600 hover:bg-amber-700'
+                        : 'bg-teal-700 hover:bg-teal-800'
+                    }`}
+                  >
+                    <ArrowUpFromLine className="h-3.5 w-3.5" />
+                    Kirim Data
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={() => onNavigate('sinkronisasi')}
-                  className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
                 >
-                  Pengaturan Sync
+                  Pengaturan & Share Spreadsheet
                 </button>
               </div>
             )}

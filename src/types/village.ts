@@ -177,8 +177,11 @@ export interface LetterRecord {
 export interface SheetTabMapping {
   penduduk: string;
   kewilayahan: string;
+  dusun?: string;
+  rw?: string;
   arsipSurat: string;
   profilDesa: string;
+  templates?: string;
 }
 
 export interface SyncLogEntry {

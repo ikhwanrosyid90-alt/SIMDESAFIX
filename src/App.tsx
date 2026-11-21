@@ -1,6 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   BarChart3,
   Cloud,
   FileText,
@@ -46,11 +48,13 @@ import {
 } from './services/googleAuth';
 import {
   createVillageSpreadsheet,
+  DEFAULT_TAB_NAMES,
   fetchSpreadsheetMetadata,
   listArchivedDriveFiles,
   listDriveSpreadsheets,
   pullFromGoogleSheets,
   pushToGoogleSheets,
+  resolveTabMapping,
   shareSpreadsheetWithEmail,
   SpreadsheetMetadata,
   uploadFileToDrive,
@@ -80,6 +84,9 @@ const STORAGE_KEYS = {
   spreadsheetMeta: 'simdesa_spreadsheet_meta_v1',
   tabMapping: 'simdesa_tab_mapping_v1',
   autoSync: 'simdesa_autosync_v1',
+  unsyncedAreas: 'simdesa_unsynced_areas_v1',
+  lastSyncedAt: 'simdesa_last_synced_v1',
+  lastSyncDirection: 'simdesa_last_sync_dir_v1',
 };
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -153,20 +160,31 @@ export default function App() {
       loadJson<SpreadsheetMetadata | null>(STORAGE_KEYS.spreadsheetMeta, null)
     );
   const [tabMapping, setTabMapping] = useState<SheetTabMapping>(() =>
-    loadJson(STORAGE_KEYS.tabMapping, {
-      penduduk: 'Penduduk',
-      kewilayahan: 'Kewilayahan',
-      arsipSurat: 'Arsip_Surat',
-      profilDesa: 'Profil_Desa',
-    })
+    loadJson(STORAGE_KEYS.tabMapping, { ...DEFAULT_TAB_NAMES })
   );
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.autoSync);
     return saved === null ? true : saved === 'true';
   });
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [unsyncedAreas, setUnsyncedAreas] = useState<string[]>(() =>
+    loadJson<string[]>(STORAGE_KEYS.unsyncedAreas, [])
+  );
+  const hasUnsyncedChanges = unsyncedAreas.length > 0;
+  const hasUnsyncedRef = useRef(hasUnsyncedChanges);
+  useEffect(() => {
+    hasUnsyncedRef.current = hasUnsyncedChanges;
+  }, [hasUnsyncedChanges]);
+
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(() =>
+    localStorage.getItem(STORAGE_KEYS.lastSyncedAt)
+  );
+  const [lastSyncDirection, setLastSyncDirection] = useState<'pull' | 'push' | null>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.lastSyncDirection);
+    return saved === 'pull' || saved === 'push' ? saved : null;
+  });
   const [syncLogs, setSyncLogs] = useState<SyncLogEntry[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const lastAutoPullMsRef = useRef(0);
 
   // Resident Add Modal external trigger
   const [addResidentTrigger, setAddResidentTrigger] = useState(0);
@@ -244,6 +262,26 @@ export default function App() {
   }, [autoSyncEnabled]);
 
   useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.unsyncedAreas, JSON.stringify(unsyncedAreas));
+  }, [unsyncedAreas]);
+
+  useEffect(() => {
+    if (lastSyncedAt) {
+      localStorage.setItem(STORAGE_KEYS.lastSyncedAt, lastSyncedAt);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.lastSyncedAt);
+    }
+  }, [lastSyncedAt]);
+
+  useEffect(() => {
+    if (lastSyncDirection) {
+      localStorage.setItem(STORAGE_KEYS.lastSyncDirection, lastSyncDirection);
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.lastSyncDirection);
+    }
+  }, [lastSyncDirection]);
+
+  useEffect(() => {
     try {
       if (connectedSpreadsheet) {
         localStorage.setItem(
@@ -279,8 +317,92 @@ export default function App() {
     []
   );
 
+  const markUnsynced = useCallback((area: string) => {
+    setUnsyncedAreas((prev) => (prev.includes(area) ? prev : [...prev, area]));
+  }, []);
+
+  const clearUnsynced = useCallback(() => {
+    setUnsyncedAreas([]);
+  }, []);
+
+  const pullAndApply = useCallback(
+    async (
+      token: string,
+      spreadsheetId: string,
+      mapping: SheetTabMapping,
+      spreadsheetTitleFallback?: string
+    ) => {
+      const pulled = await pullFromGoogleSheets(token, spreadsheetId, mapping);
+      setTabMapping(pulled.resolvedMapping);
+
+      if (pulled.residents && pulled.residents.length > 0) {
+        setResidents((prevResidents) =>
+          pulled.residents!.map((incoming) => {
+            const localMatch = prevResidents.find(
+              (p) => p.id === incoming.id || p.nik === incoming.nik
+            );
+            return localMatch
+              ? {
+                  ...incoming,
+                  ktpFileUrl: incoming.ktpFileUrl || localMatch.ktpFileUrl,
+                  ktpFileName: incoming.ktpFileName || localMatch.ktpFileName,
+                  kkFileUrl: incoming.kkFileUrl || localMatch.kkFileUrl,
+                  kkFileName: incoming.kkFileName || localMatch.kkFileName,
+                  bantuanList:
+                    incoming.bantuanList && incoming.bantuanList.length > 0
+                      ? incoming.bantuanList
+                      : localMatch.bantuanList,
+                }
+              : incoming;
+          })
+        );
+      }
+      if (pulled.territories && pulled.territories.length > 0) {
+        setTerritories(pulled.territories);
+      }
+      if (pulled.dusuns && pulled.dusuns.length > 0) {
+        setDusuns(pulled.dusuns);
+      }
+      if (pulled.rws && pulled.rws.length > 0) {
+        setRws(pulled.rws);
+      }
+      if (pulled.letters && pulled.letters.length > 0) {
+        setLetters(pulled.letters);
+      }
+      if (pulled.templates && pulled.templates.length > 0) {
+        setTemplates(pulled.templates);
+      }
+      if (pulled.profilePatch && Object.keys(pulled.profilePatch).length > 0) {
+        setProfile((prev) => ({
+          ...prev,
+          ...pulled.profilePatch,
+          logoPemdaUrl:
+            pulled.profilePatch?.logoPemdaUrl || prev.logoPemdaUrl || DEFAULT_PEMDA_LOGO,
+        }));
+      }
+
+      const nowIso = new Date().toISOString();
+      lastAutoPullMsRef.current = Date.now();
+      setLastSyncedAt(nowIso);
+      setLastSyncDirection('pull');
+      clearUnsynced();
+
+      const title = pulled.spreadsheetTitle || spreadsheetTitleFallback || 'Spreadsheet Desa';
+      addSyncLog(
+        'pull',
+        `Menarik data terbaru dari "${title}" (${pulled.residents?.length ?? 0} warga${
+          pulled.profilePatch?.namaDesa ? `, Desa ${pulled.profilePatch.namaDesa}` : ''
+        }).`,
+        'success'
+      );
+
+      return pulled;
+    },
+    [addSyncLog, clearUnsynced]
+  );
+
   const loadDriveFilesAndMeta = useCallback(
-    async (token: string, searchTerm = '') => {
+    async (token: string, searchTerm = '', autoPullOnConnect = true) => {
       setIsWorkspaceBusy(true);
       setWorkspaceError(null);
       try {
@@ -291,24 +413,36 @@ export default function App() {
         setDriveSpreadsheets(sheetsList);
         setArchivedDriveFiles(archiveList);
 
-        if (savedSpreadsheetId) {
+        // Determine active spreadsheet: saved ID or auto-discover SIMDESA sheet on fresh devices (e.g., HP)
+        let targetId = savedSpreadsheetId;
+        if (!targetId && sheetsList.length > 0) {
+          const simdesaSheet = sheetsList.find((f) => /simdesa/i.test(f.name));
+          if (simdesaSheet) {
+            targetId = simdesaSheet.id;
+            setSavedSpreadsheetId(targetId);
+            localStorage.setItem(STORAGE_KEYS.spreadsheetId, targetId);
+          }
+        }
+
+        if (targetId) {
           try {
-            const meta = await fetchSpreadsheetMetadata(token, savedSpreadsheetId);
+            const meta = await fetchSpreadsheetMetadata(token, targetId);
             setConnectedSpreadsheet(meta);
-            setTabMapping((prev) => ({
-              penduduk: meta.sheetTitles.includes(prev.penduduk)
-                ? prev.penduduk
-                : meta.sheetTitles[0] || 'Penduduk',
-              kewilayahan: meta.sheetTitles.includes(prev.kewilayahan)
-                ? prev.kewilayahan
-                : '',
-              arsipSurat: meta.sheetTitles.includes(prev.arsipSurat)
-                ? prev.arsipSurat
-                : '',
-              profilDesa: meta.sheetTitles.includes(prev.profilDesa)
-                ? prev.profilDesa
-                : '',
-            }));
+            const resolved = resolveTabMapping(meta.sheetTitles, tabMapping);
+            setTabMapping(resolved);
+
+            if (autoPullOnConnect && !hasUnsyncedRef.current) {
+              try {
+                const pulled = await pullAndApply(token, targetId, resolved, meta.title);
+                if (pulled.profilePatch?.namaDesa) {
+                  showToast(
+                    `Data tersinkron dengan "${meta.title}" (Desa ${pulled.profilePatch.namaDesa}).`
+                  );
+                }
+              } catch {
+                // ignore empty/custom sheet initial pull error
+              }
+            }
           } catch {
             // spreadsheet might not be accessible
           }
@@ -321,7 +455,7 @@ export default function App() {
         setIsWorkspaceBusy(false);
       }
     },
-    [savedSpreadsheetId]
+    [savedSpreadsheetId, tabMapping, pullAndApply, showToast]
   );
 
   // Initialize Firebase Auth Listener
@@ -330,7 +464,7 @@ export default function App() {
       async (user, token) => {
         setGoogleUser(user);
         setNeedsAuth(false);
-        await loadDriveFilesAndMeta(token);
+        await loadDriveFilesAndMeta(token, '', true);
       },
       (user) => {
         setGoogleUser(user);
@@ -351,7 +485,7 @@ export default function App() {
       if (result) {
         setGoogleUser(result.user);
         setNeedsAuth(false);
-        await loadDriveFilesAndMeta(result.accessToken);
+        await loadDriveFilesAndMeta(result.accessToken, '', true);
         showToast('Sesi Google Sheets & Drive aktif.');
       }
     } catch (err) {
@@ -377,7 +511,7 @@ export default function App() {
     if (result) {
       setGoogleUser(result.user);
       setNeedsAuth(false);
-      await loadDriveFilesAndMeta(result.accessToken);
+      await loadDriveFilesAndMeta(result.accessToken, '', false);
       return result.accessToken;
     }
     return null;
@@ -389,6 +523,9 @@ export default function App() {
     setNeedsAuth(true);
     setConnectedSpreadsheet(null);
     setSavedSpreadsheetId(null);
+    setLastSyncedAt(null);
+    setLastSyncDirection(null);
+    clearUnsynced();
     localStorage.removeItem(STORAGE_KEYS.spreadsheetId);
     localStorage.removeItem(STORAGE_KEYS.spreadsheetMeta);
     setDriveSpreadsheets([]);
@@ -410,60 +547,11 @@ export default function App() {
       setSavedSpreadsheetId(spreadsheetId);
       localStorage.setItem(STORAGE_KEYS.spreadsheetId, spreadsheetId);
 
-      const nextMapping: SheetTabMapping = {
-        penduduk: meta.sheetTitles.includes('Penduduk')
-          ? 'Penduduk'
-          : meta.sheetTitles[0] || '',
-        kewilayahan: meta.sheetTitles.includes('Kewilayahan') ? 'Kewilayahan' : '',
-        arsipSurat: meta.sheetTitles.includes('Arsip_Surat') ? 'Arsip_Surat' : '',
-        profilDesa: meta.sheetTitles.includes('Profil_Desa') ? 'Profil_Desa' : '',
-      };
+      const nextMapping = resolveTabMapping(meta.sheetTitles);
       setTabMapping(nextMapping);
 
-      // Immediately pull latest shared data so multi-device / other Google account syncs right away
       try {
-        const pulled = await pullFromGoogleSheets(token, spreadsheetId, nextMapping);
-        if (pulled.residents && pulled.residents.length > 0) {
-          setResidents((prevResidents) =>
-            pulled.residents!.map((incoming) => {
-              const localMatch = prevResidents.find(
-                (p) => p.id === incoming.id || p.nik === incoming.nik
-              );
-              return localMatch
-                ? {
-                    ...incoming,
-                    ktpFileUrl: localMatch.ktpFileUrl,
-                    ktpFileName: localMatch.ktpFileName,
-                    kkFileUrl: localMatch.kkFileUrl,
-                    kkFileName: localMatch.kkFileName,
-                    bantuanList:
-                      incoming.bantuanList && incoming.bantuanList.length > 0
-                        ? incoming.bantuanList
-                        : localMatch.bantuanList,
-                  }
-                : incoming;
-            })
-          );
-        }
-        if (pulled.territories && pulled.territories.length > 0) {
-          setTerritories(pulled.territories);
-        }
-        if (pulled.letters && pulled.letters.length > 0) {
-          setLetters(pulled.letters);
-        }
-        if (pulled.profilePatch && Object.keys(pulled.profilePatch).length > 0) {
-          setProfile((prev) => ({
-            ...prev,
-            ...pulled.profilePatch,
-            logoPemdaUrl: prev.logoPemdaUrl || DEFAULT_PEMDA_LOGO,
-          }));
-        }
-        setLastSyncedAt(new Date().toISOString());
-        addSyncLog(
-          'pull',
-          `Terhubung & menarik data dari "${meta.title}" (${pulled.residents?.length ?? 0} warga).`,
-          'success'
-        );
+        await pullAndApply(token, spreadsheetId, nextMapping, meta.title);
       } catch {
         // Sheet might be empty or custom format; still stays connected
       }
@@ -480,6 +568,8 @@ export default function App() {
 
   const handlePullFromSheets = useCallback(
     async (silent = false) => {
+      if (silent && hasUnsyncedRef.current) return;
+
       let token = await getAccessToken();
       if (!token && !silent) {
         try {
@@ -487,6 +577,7 @@ export default function App() {
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'Gagal menyegarkan sesi Google.';
           setWorkspaceError(msg);
+          showToast(msg);
           return;
         }
       }
@@ -497,57 +588,18 @@ export default function App() {
       if (!silent) setIsWorkspaceBusy(true);
       setWorkspaceError(null);
       try {
-        const pulled = await pullFromGoogleSheets(
+        const pulled = await pullAndApply(
           token,
           connectedSpreadsheet.spreadsheetId,
-          tabMapping
-        );
-        if (pulled.residents && pulled.residents.length > 0) {
-          setResidents((prevResidents) =>
-            pulled.residents!.map((incoming) => {
-              const localMatch = prevResidents.find(
-                (p) => p.id === incoming.id || p.nik === incoming.nik
-              );
-              return localMatch
-                ? {
-                    ...incoming,
-                    ktpFileUrl: localMatch.ktpFileUrl,
-                    ktpFileName: localMatch.ktpFileName,
-                    kkFileUrl: localMatch.kkFileUrl,
-                    kkFileName: localMatch.kkFileName,
-                    bantuanList:
-                      incoming.bantuanList && incoming.bantuanList.length > 0
-                        ? incoming.bantuanList
-                        : localMatch.bantuanList,
-                  }
-                : incoming;
-            })
-          );
-        }
-        if (pulled.territories && pulled.territories.length > 0) {
-          setTerritories(pulled.territories);
-        }
-        if (pulled.letters && pulled.letters.length > 0) {
-          setLetters(pulled.letters);
-        }
-        if (pulled.profilePatch && Object.keys(pulled.profilePatch).length > 0) {
-          setProfile((prev) => ({
-            ...prev,
-            ...pulled.profilePatch,
-            logoPemdaUrl: prev.logoPemdaUrl || DEFAULT_PEMDA_LOGO,
-          }));
-        }
-        const nowIso = new Date().toISOString();
-        setLastSyncedAt(nowIso);
-        addSyncLog(
-          'pull',
-          `Menarik data terbaru dari "${connectedSpreadsheet.title}" (${
-            pulled.residents?.length ?? 0
-          } warga).`,
-          'success'
+          tabMapping,
+          connectedSpreadsheet.title
         );
         if (!silent) {
-          showToast('Data berhasil ditarik dari Google Sheets.');
+          showToast(
+            pulled.profilePatch?.namaDesa
+              ? `Data Desa ${pulled.profilePatch.namaDesa} berhasil ditarik dari Google Sheets.`
+              : 'Data terbaru berhasil ditarik dari Google Sheets.'
+          );
         }
       } catch (err) {
         const status = (err as { status?: number })?.status;
@@ -561,23 +613,67 @@ export default function App() {
             : err instanceof Error
             ? err.message
             : 'Gagal menarik data dari Google Sheets.';
-        if (!silent) setWorkspaceError(msg);
+        if (!silent) {
+          setWorkspaceError(msg);
+          showToast(msg);
+        }
         addSyncLog('pull', msg, 'error');
       } finally {
         if (!silent) setIsWorkspaceBusy(false);
       }
     },
-    [connectedSpreadsheet, tabMapping, ensureWorkspaceToken, addSyncLog, showToast]
+    [connectedSpreadsheet, tabMapping, ensureWorkspaceToken, pullAndApply, addSyncLog, showToast]
   );
 
-  // Real-time auto-sync polling (read-only pull every 20s when enabled)
+  const requestPullFromSheets = useCallback(() => {
+    if (!connectedSpreadsheet) {
+      setActiveTab('sinkronisasi');
+      showToast('Pilih atau buat spreadsheet terlebih dahulu.');
+      return;
+    }
+    if (hasUnsyncedRef.current) {
+      setConfirmState({
+        title: 'Tarik Data Terbaru dari Google Sheets?',
+        description: `Ada perubahan lokal yang belum dikirim (${unsyncedAreas.join(
+          ', '
+        )}). Jika Anda menarik data sekarang, data lokal akan diganti dengan isi Google Sheets "${
+          connectedSpreadsheet.title
+        }".`,
+        confirmLabel: 'Tarik & Ganti Data Lokal',
+        variant: 'primary',
+        action: async () => {
+          await handlePullFromSheets(false);
+        },
+      });
+      return;
+    }
+    handlePullFromSheets(false);
+  }, [connectedSpreadsheet, unsyncedAreas, handlePullFromSheets, showToast]);
+
+  // Real-time auto-sync polling (every 12s) + immediate pull when returning to tab/app
   useEffect(() => {
-    if (!autoSyncEnabled || needsAuth || !connectedSpreadsheet) return;
+    if (!autoSyncEnabled || needsAuth || !connectedSpreadsheet || hasUnsyncedChanges) {
+      return;
+    }
     const timer = setInterval(() => {
       handlePullFromSheets(true);
-    }, 20000);
-    return () => clearInterval(timer);
-  }, [autoSyncEnabled, needsAuth, connectedSpreadsheet, handlePullFromSheets]);
+    }, 12000);
+
+    const handleResumePull = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (hasUnsyncedRef.current) return;
+      if (Date.now() - lastAutoPullMsRef.current < 4000) return;
+      handlePullFromSheets(true);
+    };
+
+    window.addEventListener('focus', handleResumePull);
+    document.addEventListener('visibilitychange', handleResumePull);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', handleResumePull);
+      document.removeEventListener('visibilitychange', handleResumePull);
+    };
+  }, [autoSyncEnabled, needsAuth, connectedSpreadsheet, hasUnsyncedChanges, handlePullFromSheets]);
 
   // Mandatory Confirmation Dialog before sharing spreadsheet Editor access with another Google account
   const requestShareSpreadsheetWithEmail = (email: string) => {
@@ -629,12 +725,12 @@ export default function App() {
   const requestCreateSpreadsheet = () => {
     setConfirmState({
       title: 'Buat Spreadsheet Baru di Google Drive?',
-      description: `Aplikasi akan membuat spreadsheet baru berjudul "SIMDESA Data Penduduk - Desa ${profile.namaDesa}" di Google Drive Anda dan mengisi seluruh data awal.`,
+      description: `Aplikasi akan membuat spreadsheet baru berjudul "SIMDESA Data Penduduk - Desa ${profile.namaDesa}" di Google Drive Anda dan mengisi seluruh data desa.`,
       details: [
+        `Profil Desa: Desa ${profile.namaDesa} (Kepala Desa: ${profile.namaKepalaDesa})`,
         `Tab Penduduk: ${residents.length} data warga`,
-        `Tab Kewilayahan: ${territories.length} unit RT/RW`,
-        `Tab Arsip_Surat: ${letters.length} riwayat surat`,
-        `Tab Profil_Desa: identitas desa & kepala desa`,
+        `Tab Dusun, RW & RT: ${dusuns.length} Dusun, ${rws.length} RW, ${territories.length} RT`,
+        `Tab Arsip Surat & Template: ${letters.length} surat, ${templates.length} template`,
       ],
       confirmLabel: 'Buat & Isi Spreadsheet',
       variant: 'primary',
@@ -652,24 +748,24 @@ export default function App() {
             profile,
             residents,
             territories,
-            letters
+            letters,
+            dusuns,
+            rws,
+            templates
           );
           setConnectedSpreadsheet(meta);
           setSavedSpreadsheetId(meta.spreadsheetId);
           localStorage.setItem(STORAGE_KEYS.spreadsheetId, meta.spreadsheetId);
-          setTabMapping({
-            penduduk: 'Penduduk',
-            kewilayahan: 'Kewilayahan',
-            arsipSurat: 'Arsip_Surat',
-            profilDesa: 'Profil_Desa',
-          });
+          setTabMapping({ ...DEFAULT_TAB_NAMES });
           setLastSyncedAt(new Date().toISOString());
+          setLastSyncDirection('push');
+          clearUnsynced();
           addSyncLog(
             'create',
-            `Membuat spreadsheet baru "${meta.title}" dan mengunggah ${residents.length} data warga.`,
+            `Membuat spreadsheet baru "${meta.title}" dan mengunggah seluruh data Desa ${profile.namaDesa}.`,
             'success'
           );
-          await loadDriveFilesAndMeta(token);
+          await loadDriveFilesAndMeta(token, '', false);
           showToast('Spreadsheet baru berhasil dibuat dan disinkronkan.');
         } catch (err) {
           const msg =
@@ -692,18 +788,15 @@ export default function App() {
     }
 
     setConfirmState({
-      title: 'Perbarui & Sinkronkan Data ke Google Sheets?',
-      description: `Operasi ini akan memperbarui isi spreadsheet "${connectedSpreadsheet.title}" dengan seluruh perubahan data terbaru di aplikasi.`,
+      title: 'Kirim & Perbarui Data ke Google Sheets?',
+      description: `Operasi ini akan memperbarui isi spreadsheet "${connectedSpreadsheet.title}" dengan seluruh perubahan data terbaru agar sama di semua HP & akun lain.`,
       details: [
-        `Tab "${tabMapping.penduduk}": ${residents.length} baris penduduk`,
-        tabMapping.kewilayahan
-          ? `Tab "${tabMapping.kewilayahan}": ${territories.length} unit wilayah`
-          : 'Tab Kewilayahan tidak dipetakan',
-        tabMapping.arsipSurat
-          ? `Tab "${tabMapping.arsipSurat}": ${letters.length} arsip surat`
-          : 'Tab Arsip Surat tidak dipetakan',
+        `Profil Desa: Desa ${profile.namaDesa} (${profile.namaKepalaDesa})`,
+        `Penduduk: ${residents.length} warga`,
+        `Kewilayahan: ${dusuns.length} Dusun, ${rws.length} RW, ${territories.length} RT`,
+        `Surat & Template: ${letters.length} arsip surat, ${templates.length} template`,
       ],
-      confirmLabel: 'Konfirmasi Sinkronisasi',
+      confirmLabel: 'Kirim & Simpan ke Sheets',
       variant: 'primary',
       action: async () => {
         const token = await ensureWorkspaceToken();
@@ -714,19 +807,22 @@ export default function App() {
         setIsWorkspaceBusy(true);
         setWorkspaceError(null);
         try {
-          await pushToGoogleSheets(
+          const syncedMapping = await pushToGoogleSheets(
             token,
             connectedSpreadsheet.spreadsheetId,
             tabMapping,
-            { profile, residents, territories, letters }
+            { profile, residents, territories, dusuns, rws, letters, templates }
           );
+          setTabMapping(syncedMapping);
           setLastSyncedAt(new Date().toISOString());
+          setLastSyncDirection('push');
+          clearUnsynced();
           addSyncLog(
             'push',
-            `Berhasil memperbarui "${connectedSpreadsheet.title}" (${residents.length} warga, ${letters.length} surat).`,
+            `Mengirim pembaruan Desa ${profile.namaDesa} ke "${connectedSpreadsheet.title}" (${residents.length} warga, ${dusuns.length} dusun, ${letters.length} surat).`,
             'success'
           );
-          showToast('Data berhasil disinkronkan ke Google Sheets.');
+          showToast(`Data Desa ${profile.namaDesa} berhasil dikirim ke Google Sheets.`);
         } catch (err) {
           const status = (err as { status?: number })?.status;
           if (status === 401) {
@@ -892,6 +988,7 @@ export default function App() {
           : r
       );
     });
+    markUnsynced('Data Penduduk');
     showToast(
       isNew
         ? `Penduduk "${saved.nama}" ditambahkan.`
@@ -912,6 +1009,7 @@ export default function App() {
       variant: 'danger',
       action: () => {
         setResidents((prev) => prev.filter((r) => r.id !== resident.id));
+        markUnsynced('Data Penduduk');
         showToast(`Data warga "${resident.nama}" telah dihapus.`);
       },
     });
@@ -922,6 +1020,7 @@ export default function App() {
     setDusuns((prev) =>
       isNew ? [...prev, dusun] : prev.map((d) => (d.id === dusun.id ? dusun : d))
     );
+    markUnsynced('Dusun & Pengurus');
     showToast(
       isNew
         ? `Wilayah ${dusun.namaDusun} ditambahkan.`
@@ -943,6 +1042,7 @@ export default function App() {
       variant: 'danger',
       action: () => {
         setDusuns((prev) => prev.filter((d) => d.id !== dusun.id));
+        markUnsynced('Dusun & Pengurus');
         showToast(`${dusun.namaDusun} telah dihapus.`);
       },
     });
@@ -953,6 +1053,7 @@ export default function App() {
     setRws((prev) =>
       isNew ? [...prev, rw] : prev.map((item) => (item.id === rw.id ? rw : item))
     );
+    markUnsynced('Data RW');
     showToast(
       isNew
         ? `RW ${rw.rw} (${rw.namaDusun}) ditambahkan.`
@@ -974,6 +1075,7 @@ export default function App() {
       variant: 'danger',
       action: () => {
         setRws((prev) => prev.filter((item) => item.id !== rw.id));
+        markUnsynced('Data RW');
         showToast(`RW ${rw.rw} dihapus.`);
       },
     });
@@ -984,6 +1086,7 @@ export default function App() {
     setTerritories((prev) =>
       isNew ? [...prev, unit] : prev.map((t) => (t.id === unit.id ? unit : t))
     );
+    markUnsynced('Data RT');
     showToast(
       isNew
         ? `Wilayah ${unit.namaDusun} RT ${unit.rt}/RW ${unit.rw} ditambahkan.`
@@ -1005,6 +1108,7 @@ export default function App() {
       variant: 'danger',
       action: () => {
         setTerritories((prev) => prev.filter((t) => t.id !== unit.id));
+        markUnsynced('Data RT');
         showToast(`RT ${unit.rt} / RW ${unit.rw} (${unit.namaDusun}) dihapus.`);
       },
     });
@@ -1033,6 +1137,7 @@ export default function App() {
         ? prev.map((l) => (l.id === record.id ? record : l))
         : [record, ...prev];
     });
+    markUnsynced('Arsip Surat');
   };
 
   const activeTemplate =
@@ -1167,19 +1272,32 @@ export default function App() {
                     : 'Belum memilih spreadsheet'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={requestPushToSheets}
-                disabled={isWorkspaceBusy}
-                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <RefreshCw
-                  className={`h-3.5 w-3.5 text-teal-700 ${
-                    isWorkspaceBusy ? 'animate-spin' : ''
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={requestPullFromSheets}
+                  disabled={isWorkspaceBusy}
+                  className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                  title="Tarik pembaruan dari Google Sheets"
+                >
+                  <ArrowDownToLine className="h-3 w-3 text-teal-700" />
+                  Tarik
+                </button>
+                <button
+                  type="button"
+                  onClick={requestPushToSheets}
+                  disabled={isWorkspaceBusy}
+                  className={`inline-flex items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-[11px] font-medium text-white ${
+                    hasUnsyncedChanges
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-teal-700 hover:bg-teal-800'
                   }`}
-                />
-                Sinkronkan Sheets
-              </button>
+                  title="Kirim perubahan ke Google Sheets"
+                >
+                  <ArrowUpFromLine className="h-3 w-3" />
+                  Kirim
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1275,17 +1393,32 @@ export default function App() {
                   <p className="truncate text-xs font-medium text-slate-900">
                     {googleUser.displayName || 'Google Terhubung'}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMobileMenuOpen(false);
-                      requestPushToSheets();
-                    }}
-                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5 text-teal-700" />
-                    Sinkronkan Sheets
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileMenuOpen(false);
+                        requestPullFromSheets();
+                      }}
+                      className="inline-flex items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-medium text-slate-700"
+                    >
+                      <ArrowDownToLine className="h-3.5 w-3.5 text-teal-700" />
+                      Tarik
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMobileMenuOpen(false);
+                        requestPushToSheets();
+                      }}
+                      className={`inline-flex items-center justify-center gap-1 rounded-lg px-2.5 py-2 text-xs font-medium text-white ${
+                        hasUnsyncedChanges ? 'bg-amber-600' : 'bg-teal-700'
+                      }`}
+                    >
+                      <ArrowUpFromLine className="h-3.5 w-3.5" />
+                      Kirim
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -1317,7 +1450,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
             <PWAInstallButton compact />
             {!googleUser ? (
               <GoogleSignInButton
@@ -1336,19 +1469,109 @@ export default function App() {
                 Aktifkan Sync
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('penduduk');
-                  setAddResidentTrigger((n) => n + 1);
-                }}
-                className="rounded-lg bg-teal-700 px-3 sm:px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-teal-800 whitespace-nowrap shrink-0"
-              >
-                + Penduduk
-              </button>
+              <>
+                {connectedSpreadsheet && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={requestPullFromSheets}
+                      disabled={isWorkspaceBusy}
+                      title="Tarik pembaruan terbaru dari Google Sheets"
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap shrink-0"
+                    >
+                      <ArrowDownToLine className={`h-3.5 w-3.5 text-teal-700 ${isWorkspaceBusy ? 'animate-pulse' : ''}`} />
+                      <span className="hidden sm:inline">Tarik</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={requestPushToSheets}
+                      disabled={isWorkspaceBusy}
+                      title="Kirim pembaruan lokal ke Google Sheets"
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-2 text-xs font-medium disabled:opacity-50 whitespace-nowrap shrink-0 ${
+                        hasUnsyncedChanges
+                          ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <ArrowUpFromLine className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">Kirim</span>
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('penduduk');
+                    setAddResidentTrigger((n) => n + 1);
+                  }}
+                  className="rounded-lg bg-teal-700 px-3 sm:px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-teal-800 whitespace-nowrap shrink-0"
+                >
+                  + Penduduk
+                </button>
+              </>
             )}
           </div>
         </header>
+
+        {/* Unsynced Local Changes Banner */}
+        {hasUnsyncedChanges && (
+          <div className="no-print border-b border-amber-200 bg-amber-50 px-3 py-2 sm:px-6 md:px-8">
+            <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 text-xs text-amber-900">
+              <p className="leading-snug">
+                <strong>Perubahan belum dikirim ke Sheets</strong> ({unsyncedAreas.join(', ')}).{' '}
+                <span className="hidden sm:inline">
+                  Kirim ke Google Sheets agar HP & akun lain langsung menampilkan Desa {profile.namaDesa}.
+                </span>
+              </p>
+              <div className="flex items-center gap-2 shrink-0">
+                {!googleUser ? (
+                  <button
+                    type="button"
+                    onClick={() => handleGoogleSignIn(true)}
+                    className="rounded-md bg-amber-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-800"
+                  >
+                    Masuk Google
+                  </button>
+                ) : needsAuth ? (
+                  <button
+                    type="button"
+                    onClick={() => handleGoogleSignIn(false)}
+                    className="rounded-md bg-amber-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-800"
+                  >
+                    Aktifkan Sync
+                  </button>
+                ) : connectedSpreadsheet ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={requestPullFromSheets}
+                      disabled={isWorkspaceBusy}
+                      className="rounded-md border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+                    >
+                      Tarik dari Sheets
+                    </button>
+                    <button
+                      type="button"
+                      onClick={requestPushToSheets}
+                      disabled={isWorkspaceBusy}
+                      className="rounded-md bg-amber-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-800"
+                    >
+                      Kirim ke Sheets
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('sinkronisasi')}
+                    className="rounded-md bg-amber-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-amber-800"
+                  >
+                    Pilih Spreadsheet
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Active Viewport */}
         <main className="mx-auto w-full max-w-7xl flex-1 p-3 sm:p-5 md:p-8">
@@ -1364,9 +1587,15 @@ export default function App() {
               isGoogleConnected={!needsAuth}
               connectedSpreadsheetTitle={connectedSpreadsheet?.title || null}
               lastSyncedAt={lastSyncedAt}
+              lastSyncDirection={lastSyncDirection}
+              hasUnsyncedChanges={hasUnsyncedChanges}
+              unsyncedAreas={unsyncedAreas}
               onUpdateProfile={(next) => {
                 setProfile(next);
-                showToast(`Identitas Desa ${next.namaDesa} berhasil disimpan.`);
+                markUnsynced('Profil Desa');
+                showToast(
+                  `Identitas Desa ${next.namaDesa} disimpan. Klik Kirim Data agar sinkron ke semua HP.`
+                );
               }}
               onNavigate={setActiveTab}
               onQuickAddResident={() => {
@@ -1374,6 +1603,7 @@ export default function App() {
                 setAddResidentTrigger((n) => n + 1);
               }}
               onGoogleLogin={() => handleGoogleSignIn(!googleUser)}
+              onPullNow={requestPullFromSheets}
               onSyncNow={requestPushToSheets}
               onUploadLogoToDrive={requestUploadLogoToDrive}
             />
@@ -1405,6 +1635,7 @@ export default function App() {
                 setTemplates((prev) =>
                   prev.map((t) => (t.type === updated.type ? updated : t))
                 );
+                markUnsynced('Template Surat');
                 showToast(`Template ${updated.label} diperbarui.`);
               }}
               onOpenLetterPreview={handleOpenLetterPreview}
@@ -1443,6 +1674,7 @@ export default function App() {
                   kantorLng: lng,
                   updatedAt: new Date().toISOString(),
                 }));
+                markUnsynced('Koordinat Kantor Desa');
                 showToast(`Koordinat Kantor Desa ${profile.namaDesa} disimpan.`);
               }}
               onUpdateTerritoryCoords={(territoryId, lat, lng) => {
@@ -1453,6 +1685,7 @@ export default function App() {
                       : t
                   )
                 );
+                markUnsynced('Koordinat Wilayah');
                 showToast(
                   lat !== undefined
                     ? 'Titik koordinat wilayah berhasil ditandai di peta.'
@@ -1481,17 +1714,21 @@ export default function App() {
               connectedSpreadsheet={connectedSpreadsheet}
               tabMapping={tabMapping}
               autoSyncEnabled={autoSyncEnabled}
+              lastSyncedAt={lastSyncedAt}
+              lastSyncDirection={lastSyncDirection}
+              hasUnsyncedChanges={hasUnsyncedChanges}
+              unsyncedAreas={unsyncedAreas}
               syncLogs={syncLogs}
               onSignIn={() => handleGoogleSignIn(!googleUser)}
               onSignOut={handleGoogleSignOut}
               onRefreshDriveList={async (search) => {
-                const token = await getAccessToken();
-                if (token) await loadDriveFilesAndMeta(token, search);
+                const token = await ensureWorkspaceToken();
+                if (token) await loadDriveFilesAndMeta(token, search, false);
               }}
               onSelectSpreadsheet={handleSelectSpreadsheet}
               onCreateSpreadsheet={requestCreateSpreadsheet}
               onUpdateTabMapping={setTabMapping}
-              onPullFromSheets={() => handlePullFromSheets(false)}
+              onPullFromSheets={requestPullFromSheets}
               onRequestPushToSheets={requestPushToSheets}
               onToggleAutoSync={setAutoSyncEnabled}
               onShareSpreadsheetWithEmail={requestShareSpreadsheetWithEmail}

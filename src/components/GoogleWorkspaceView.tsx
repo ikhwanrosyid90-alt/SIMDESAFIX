@@ -35,6 +35,10 @@ interface GoogleWorkspaceViewProps {
   connectedSpreadsheet: SpreadsheetMetadata | null;
   tabMapping: SheetTabMapping;
   autoSyncEnabled: boolean;
+  lastSyncedAt?: string | null;
+  lastSyncDirection?: 'pull' | 'push' | null;
+  hasUnsyncedChanges?: boolean;
+  unsyncedAreas?: string[];
   syncLogs: SyncLogEntry[];
   onSignIn: () => void;
   onSignOut: () => void;
@@ -58,6 +62,10 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
   connectedSpreadsheet,
   tabMapping,
   autoSyncEnabled,
+  lastSyncedAt = null,
+  lastSyncDirection = null,
+  hasUnsyncedChanges = false,
+  unsyncedAreas = [],
   syncLogs,
   onSignIn,
   onSignOut,
@@ -436,7 +444,7 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700">
-                    Tab Kewilayahan
+                    Tab Kewilayahan (RT)
                   </label>
                   <select
                     value={tabMapping.kewilayahan}
@@ -448,7 +456,53 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
                     }
                     className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
                   >
-                    <option value="">(Tidak Dipetakan)</option>
+                    <option value="">(Otomatis / Tidak Dipetakan)</option>
+                    {connectedSpreadsheet.sheetTitles.map((title) => (
+                      <option key={title} value={title}>
+                        {title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700">
+                    Tab Dusun & Pengurus
+                  </label>
+                  <select
+                    value={tabMapping.dusun || ''}
+                    onChange={(e) =>
+                      onUpdateTabMapping({
+                        ...tabMapping,
+                        dusun: e.target.value,
+                      })
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
+                  >
+                    <option value="">(Otomatis: Dusun_Pengurus)</option>
+                    {connectedSpreadsheet.sheetTitles.map((title) => (
+                      <option key={title} value={title}>
+                        {title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700">
+                    Tab Data RW
+                  </label>
+                  <select
+                    value={tabMapping.rw || ''}
+                    onChange={(e) =>
+                      onUpdateTabMapping({
+                        ...tabMapping,
+                        rw: e.target.value,
+                      })
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
+                  >
+                    <option value="">(Otomatis: RW_Unit)</option>
                     {connectedSpreadsheet.sheetTitles.map((title) => (
                       <option key={title} value={title}>
                         {title}
@@ -471,7 +525,7 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
                     }
                     className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
                   >
-                    <option value="">(Tidak Dipetakan)</option>
+                    <option value="">(Otomatis: Arsip_Surat)</option>
                     {connectedSpreadsheet.sheetTitles.map((title) => (
                       <option key={title} value={title}>
                         {title}
@@ -482,7 +536,7 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700">
-                    Tab Profil Desa
+                    Tab Profil & Logo Desa
                   </label>
                   <select
                     value={tabMapping.profilDesa}
@@ -494,7 +548,30 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
                     }
                     className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
                   >
-                    <option value="">(Tidak Dipetakan)</option>
+                    <option value="">(Otomatis: Profil_Desa)</option>
+                    {connectedSpreadsheet.sheetTitles.map((title) => (
+                      <option key={title} value={title}>
+                        {title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-medium text-slate-700">
+                    Tab Template Surat
+                  </label>
+                  <select
+                    value={tabMapping.templates || ''}
+                    onChange={(e) =>
+                      onUpdateTabMapping({
+                        ...tabMapping,
+                        templates: e.target.value,
+                      })
+                    }
+                    className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900"
+                  >
+                    <option value="">(Otomatis: Template_Surat)</option>
                     {connectedSpreadsheet.sheetTitles.map((title) => (
                       <option key={title} value={title}>
                         {title}
@@ -503,6 +580,29 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
                   </select>
                 </div>
               </div>
+
+              {hasUnsyncedChanges && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+                  <p className="font-semibold">
+                    Perubahan lokal belum dikirim ke Google Sheets:
+                  </p>
+                  <p className="mt-0.5 text-[11px]">
+                    {unsyncedAreas.length > 0 ? unsyncedAreas.join(', ') : 'Data desa'}. Auto-tarik otomatis dijeda sementara agar editan Anda tidak tertimpa. Klik <strong>Kirim Data</strong> di bawah untuk memperbarui semua HP & akun lain.
+                  </p>
+                </div>
+              )}
+
+              {lastSyncedAt && (
+                <p className="text-[11px] text-slate-500 font-mono-tabular">
+                  Sinkronisasi terakhir:{' '}
+                  {new Date(lastSyncedAt).toLocaleString('id-ID')}
+                  {lastSyncDirection === 'pull'
+                    ? ' (Tarik Data)'
+                    : lastSyncDirection === 'push'
+                    ? ' (Kirim Data)'
+                    : ''}
+                </p>
+              )}
 
               {/* Sync Buttons */}
               <div className="flex flex-wrap gap-3">
@@ -513,16 +613,20 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
                   className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
                 >
                   <ArrowDownToLine className="h-3.5 w-3.5 text-teal-700" />
-                  Tarik Pembaruan dari Sheets
+                  Tarik Data dari Sheets
                 </button>
                 <button
                   type="button"
                   onClick={onRequestPushToSheets}
                   disabled={isBusy}
-                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2.5 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-50 whitespace-nowrap"
+                  className={`inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg px-4 py-2.5 text-xs font-medium text-white disabled:opacity-50 whitespace-nowrap ${
+                    hasUnsyncedChanges
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-teal-700 hover:bg-teal-800'
+                  }`}
                 >
                   <ArrowUpFromLine className="h-3.5 w-3.5" />
-                  Kirim & Sinkronkan ke Sheets
+                  Kirim Data ke Sheets
                 </button>
               </div>
 
@@ -530,11 +634,10 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
               <label className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs cursor-pointer">
                 <div>
                   <p className="font-medium text-slate-900">
-                    Pantau Perubahan Google Sheets Otomatis (Setiap 20 Detik)
+                    Pantau & Tarik Perubahan Otomatis (Setiap 12 Detik & Saat Buka App)
                   </p>
                   <p className="text-[11px] text-slate-500">
-                    Memperbarui tampilan HP/PC otomatis bila ada perangkat desa lain yang
-                    mengirim pembaruan ke Google Sheets.
+                    Otomatis menyamakan Profil Desa, Penduduk, Dusun/RW/RT, dan Surat di HP & PC lain (otomatis dijeda jika ada editan lokal yang belum dikirim).
                   </p>
                 </div>
                 <input

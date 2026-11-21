@@ -1,7 +1,11 @@
 import {
   DriveFileItem,
+  DusunCommitteeMember,
+  DusunUnit,
   LetterRecord,
+  LetterTemplate,
   Resident,
+  RwUnit,
   SheetTabMapping,
   TerritoryUnit,
   VillageProfile,
@@ -13,6 +17,16 @@ export interface SpreadsheetMetadata {
   spreadsheetUrl: string;
   sheetTitles: string[];
 }
+
+export const DEFAULT_TAB_NAMES: Required<SheetTabMapping> = {
+  penduduk: 'Penduduk',
+  kewilayahan: 'Kewilayahan',
+  dusun: 'Dusun_Pengurus',
+  rw: 'RW_Unit',
+  arsipSurat: 'Arsip_Surat',
+  profilDesa: 'Profil_Desa',
+  templates: 'Template_Surat',
+};
 
 const PENDUDUK_HEADERS = [
   'ID',
@@ -61,6 +75,27 @@ const KEWILAYAHAN_HEADERS = [
   'Longitude',
 ];
 
+const DUSUN_HEADERS = [
+  'ID',
+  'Kode',
+  'Nama_Dusun',
+  'Kepala_Dusun',
+  'No_HP_Kadus',
+  'Luas_Wilayah',
+  'Keterangan',
+  'Kepengurusan_JSON',
+];
+
+const RW_HEADERS = [
+  'ID',
+  'Dusun_Kode',
+  'Nama_Dusun',
+  'RW',
+  'Ketua_RW',
+  'No_HP_RW',
+  'Keterangan',
+];
+
 const ARSIP_SURAT_HEADERS = [
   'ID',
   'Nomor_Surat',
@@ -73,9 +108,25 @@ const ARSIP_SURAT_HEADERS = [
   'Keperluan',
   'Penandatangan',
   'Detail_JSON',
+  'Drive_File_ID',
 ];
 
 const PROFIL_DESA_HEADERS = ['Field', 'Value'];
+
+const TEMPLATE_SURAT_HEADERS = [
+  'Type',
+  'Label',
+  'Kode_Klasifikasi',
+  'Format_Nomor',
+  'Judul_Surat',
+  'Sub_Judul',
+  'Kalimat_Pembuka',
+  'Kalimat_Isi',
+  'Kalimat_Penutup',
+  'Jabatan_Penandatangan',
+  'Tampilkan_Masa_Berlaku',
+  'Masa_Berlaku_Hari',
+];
 
 async function googleFetch(url: string, accessToken: string, options: RequestInit = {}) {
   const response = await fetch(url, {
@@ -209,6 +260,76 @@ export async function fetchSpreadsheetMetadata(
   };
 }
 
+export function resolveTabMapping(
+  sheetTitles: string[],
+  current?: Partial<SheetTabMapping>
+): SheetTabMapping {
+  const pick = (preferred: string | undefined, standard: string, fallback = '') => {
+    if (preferred && sheetTitles.includes(preferred)) return preferred;
+    if (sheetTitles.includes(standard)) return standard;
+    return fallback;
+  };
+
+  return {
+    penduduk: pick(current?.penduduk, DEFAULT_TAB_NAMES.penduduk, sheetTitles[0] || DEFAULT_TAB_NAMES.penduduk),
+    kewilayahan: pick(current?.kewilayahan, DEFAULT_TAB_NAMES.kewilayahan),
+    dusun: pick(current?.dusun, DEFAULT_TAB_NAMES.dusun),
+    rw: pick(current?.rw, DEFAULT_TAB_NAMES.rw),
+    arsipSurat: pick(current?.arsipSurat, DEFAULT_TAB_NAMES.arsipSurat),
+    profilDesa: pick(current?.profilDesa, DEFAULT_TAB_NAMES.profilDesa),
+    templates: pick(current?.templates, DEFAULT_TAB_NAMES.templates),
+  };
+}
+
+async function ensureSheetTabsExist(
+  accessToken: string,
+  spreadsheetId: string,
+  desiredTitles: string[]
+): Promise<string[]> {
+  const meta = await fetchSpreadsheetMetadata(accessToken, spreadsheetId);
+  const missing = desiredTitles.filter(
+    (title) => Boolean(title) && !meta.sheetTitles.includes(title)
+  );
+
+  if (missing.length > 0) {
+    await googleFetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+        spreadsheetId
+      )}:batchUpdate`,
+      accessToken,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: missing.map((title) => ({
+            addSheet: { properties: { title } },
+          })),
+        }),
+      }
+    );
+  }
+
+  return [...meta.sheetTitles, ...missing];
+}
+
+function encodeDocCell(url?: string, fileName?: string): string {
+  if (!url) return 'Belum';
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return `${url}|${fileName || 'berkas'}`;
+  }
+  return `Ada (${fileName || 'berkas'})`;
+}
+
+function decodeDocCell(cellValue?: string): { url?: string; fileName?: string } {
+  const trimmed = String(cellValue || '').trim();
+  if (!trimmed || trimmed === 'Belum') return {};
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    const [url, fileName] = trimmed.split('|');
+    return { url, fileName: fileName || 'berkas' };
+  }
+  return {};
+}
+
 function residentToRow(r: Resident): string[] {
   return [
     r.id,
@@ -237,8 +358,8 @@ function residentToRow(r: Resident): string[] {
     r.kondisiRumah || 'Permanen (Tembok)',
     r.statusRtlh || 'Layak Huni',
     JSON.stringify(r.bantuanList || []),
-    r.ktpFileUrl ? `Ada (${r.ktpFileName || 'ktp'})` : 'Belum',
-    r.kkFileUrl ? `Ada (${r.kkFileName || 'kk'})` : 'Belum',
+    encodeDocCell(r.ktpFileUrl, r.ktpFileName),
+    encodeDocCell(r.kkFileUrl, r.kkFileName),
     r.updatedAt,
   ];
 }
@@ -264,6 +385,9 @@ function rowToResident(row: string[], index: number): Resident | null {
       bantuanList = [];
     }
   }
+
+  const ktpDoc = isV3 ? decodeDocCell(row[26]) : {};
+  const kkDoc = isV3 ? decodeDocCell(row[27]) : {};
 
   return {
     id: row[0] || `res-sheet-${index + 1}`,
@@ -292,6 +416,10 @@ function rowToResident(row: string[], index: number): Resident | null {
     kondisiRumah: (isV3 && (row[23] as Resident['kondisiRumah'])) || 'Permanen (Tembok)',
     statusRtlh: (isV3 && (row[24] as Resident['statusRtlh'])) || 'Layak Huni',
     bantuanList,
+    ktpFileUrl: ktpDoc.url,
+    ktpFileName: ktpDoc.fileName,
+    kkFileUrl: kkDoc.url,
+    kkFileName: kkDoc.fileName,
     updatedAt: row[updatedColIdx] || new Date().toISOString(),
   };
 }
@@ -333,6 +461,67 @@ function rowToTerritory(row: string[], index: number): TerritoryUnit | null {
   };
 }
 
+function dusunToRow(d: DusunUnit): string[] {
+  return [
+    d.id,
+    d.kode,
+    d.namaDusun,
+    d.kepalaDusun,
+    d.noHpKadus,
+    d.luasWilayah,
+    d.keterangan,
+    JSON.stringify(d.kepengurusan || []),
+  ];
+}
+
+function rowToDusun(row: string[], index: number): DusunUnit | null {
+  if (!row || row.length < 3 || !row[2]) return null;
+  let kepengurusan: DusunCommitteeMember[] = [];
+  if (row[7]) {
+    try {
+      const parsed = JSON.parse(row[7]);
+      if (Array.isArray(parsed)) kepengurusan = parsed;
+    } catch {
+      kepengurusan = [];
+    }
+  }
+  return {
+    id: row[0] || `dsn-sheet-${index + 1}`,
+    kode: row[1] || `DSN-0${index + 1}`,
+    namaDusun: row[2],
+    kepalaDusun: row[3] || '-',
+    noHpKadus: row[4] || '-',
+    luasWilayah: row[5] || '-',
+    keterangan: row[6] || '-',
+    kepengurusan,
+  };
+}
+
+function rwToRow(r: RwUnit): string[] {
+  return [
+    r.id,
+    r.dusunKode,
+    r.namaDusun,
+    r.rw,
+    r.ketuaRw,
+    r.noHpRw,
+    r.keterangan,
+  ];
+}
+
+function rowToRw(row: string[], index: number): RwUnit | null {
+  if (!row || row.length < 4 || !row[3]) return null;
+  return {
+    id: row[0] || `rw-sheet-${index + 1}`,
+    dusunKode: row[1] || 'DSN-01',
+    namaDusun: row[2] || 'Dusun',
+    rw: row[3] || '001',
+    ketuaRw: row[4] || '-',
+    noHpRw: row[5] || '-',
+    keterangan: row[6] || '-',
+  };
+}
+
 function letterToRow(l: LetterRecord): string[] {
   return [
     l.id,
@@ -346,6 +535,7 @@ function letterToRow(l: LetterRecord): string[] {
     l.keperluan,
     l.penandatangan,
     JSON.stringify(l.customFields || {}),
+    l.driveFileId || '',
   ];
 }
 
@@ -369,10 +559,52 @@ function rowToLetter(row: string[], index: number): LetterRecord | null {
     keperluan: row[8] || '',
     penandatangan: row[9] || '',
     customFields,
+    driveFileId: row[11] || undefined,
+  };
+}
+
+function templateToRow(t: LetterTemplate): string[] {
+  return [
+    t.type,
+    t.label,
+    t.kodeKlasifikasi,
+    t.formatNomor,
+    t.judulSurat,
+    t.subJudul,
+    t.kalimatPembuka,
+    t.kalimatIsi,
+    t.kalimatPenutup,
+    t.jabatanPenandatangan,
+    t.tampilkanMasaBerlaku ? 'TRUE' : 'FALSE',
+    String(t.masaBerlakuHari ?? 30),
+  ];
+}
+
+function rowToTemplate(row: string[]): LetterTemplate | null {
+  if (!row || row.length < 5 || !row[0]) return null;
+  const type = row[0] as LetterTemplate['type'];
+  if (!['pengantar', 'domisili', 'usaha', 'sktm'].includes(type)) return null;
+  return {
+    type,
+    label: row[1] || 'Surat Desa',
+    kodeKlasifikasi: row[2] || '470',
+    formatNomor: row[3] || '470/{{NO}}/DS/{{BULAN_ROMAWI}}/{{TAHUN}}',
+    judulSurat: row[4] || 'SURAT KETERANGAN',
+    subJudul: row[5] || '',
+    kalimatPembuka: row[6] || '',
+    kalimatIsi: row[7] || '',
+    kalimatPenutup: row[8] || '',
+    jabatanPenandatangan: row[9] || 'Kepala Desa {{nama_desa}}',
+    tampilkanMasaBerlaku: String(row[10]).toUpperCase() !== 'FALSE',
+    masaBerlakuHari: Number(row[11]) || 30,
   };
 }
 
 function profileToRows(p: VillageProfile): string[][] {
+  // Google Sheets single cell limit is 50,000 chars; safely omit oversized base64 logo if > 45,000 chars
+  const safeLogo =
+    p.logoPemdaUrl && p.logoPemdaUrl.length <= 45000 ? p.logoPemdaUrl : '';
+
   return [
     PROFIL_DESA_HEADERS,
     ['namaDesa', p.namaDesa],
@@ -387,6 +619,7 @@ function profileToRows(p: VillageProfile): string[][] {
     ['website', p.website],
     ['namaKepalaDesa', p.namaKepalaDesa],
     ['nipKepalaDesa', p.nipKepalaDesa],
+    ['logoPemdaUrl', safeLogo],
     ['kantorLat', p.kantorLat !== undefined ? String(p.kantorLat) : ''],
     ['kantorLng', p.kantorLng !== undefined ? String(p.kantorLng) : ''],
     ['updatedAt', p.updatedAt],
@@ -402,7 +635,10 @@ export async function createVillageSpreadsheet(
   profile: VillageProfile,
   residents: Resident[],
   territories: TerritoryUnit[],
-  letters: LetterRecord[]
+  letters: LetterRecord[],
+  dusuns: DusunUnit[] = [],
+  rws: RwUnit[] = [],
+  templates: LetterTemplate[] = []
 ): Promise<SpreadsheetMetadata> {
   const title = `SIMDESA Data Penduduk - Desa ${profile.namaDesa}`;
 
@@ -415,10 +651,13 @@ export async function createVillageSpreadsheet(
       body: JSON.stringify({
         properties: { title },
         sheets: [
-          { properties: { title: 'Penduduk' } },
-          { properties: { title: 'Kewilayahan' } },
-          { properties: { title: 'Arsip_Surat' } },
-          { properties: { title: 'Profil_Desa' } },
+          { properties: { title: DEFAULT_TAB_NAMES.penduduk } },
+          { properties: { title: DEFAULT_TAB_NAMES.kewilayahan } },
+          { properties: { title: DEFAULT_TAB_NAMES.dusun } },
+          { properties: { title: DEFAULT_TAB_NAMES.rw } },
+          { properties: { title: DEFAULT_TAB_NAMES.arsipSurat } },
+          { properties: { title: DEFAULT_TAB_NAMES.profilDesa } },
+          { properties: { title: DEFAULT_TAB_NAMES.templates } },
         ],
       }),
     }
@@ -428,19 +667,22 @@ export async function createVillageSpreadsheet(
     spreadsheetId: created.spreadsheetId,
     title: created.properties?.title || title,
     spreadsheetUrl: created.spreadsheetUrl,
-    sheetTitles: ['Penduduk', 'Kewilayahan', 'Arsip_Surat', 'Profil_Desa'],
+    sheetTitles: [
+      DEFAULT_TAB_NAMES.penduduk,
+      DEFAULT_TAB_NAMES.kewilayahan,
+      DEFAULT_TAB_NAMES.dusun,
+      DEFAULT_TAB_NAMES.rw,
+      DEFAULT_TAB_NAMES.arsipSurat,
+      DEFAULT_TAB_NAMES.profilDesa,
+      DEFAULT_TAB_NAMES.templates,
+    ],
   };
 
   await pushToGoogleSheets(
     accessToken,
     meta.spreadsheetId,
-    {
-      penduduk: 'Penduduk',
-      kewilayahan: 'Kewilayahan',
-      arsipSurat: 'Arsip_Surat',
-      profilDesa: 'Profil_Desa',
-    },
-    { profile, residents, territories, letters }
+    DEFAULT_TAB_NAMES,
+    { profile, residents, territories, dusuns, rws, letters, templates }
   );
 
   return meta;
@@ -454,14 +696,51 @@ export async function pushToGoogleSheets(
     profile: VillageProfile;
     residents: Resident[];
     territories: TerritoryUnit[];
+    dusuns?: DusunUnit[];
+    rws?: RwUnit[];
     letters: LetterRecord[];
+    templates?: LetterTemplate[];
   }
-): Promise<void> {
+): Promise<SheetTabMapping> {
+  // Ensure every active/standard tab exists on the spreadsheet (upgrades legacy 4-tab sheets cleanly)
+  const effectiveMapping: SheetTabMapping = {
+    penduduk: tabMapping.penduduk || DEFAULT_TAB_NAMES.penduduk,
+    kewilayahan: tabMapping.kewilayahan || DEFAULT_TAB_NAMES.kewilayahan,
+    dusun: tabMapping.dusun || DEFAULT_TAB_NAMES.dusun,
+    rw: tabMapping.rw || DEFAULT_TAB_NAMES.rw,
+    arsipSurat: tabMapping.arsipSurat || DEFAULT_TAB_NAMES.arsipSurat,
+    profilDesa: tabMapping.profilDesa || DEFAULT_TAB_NAMES.profilDesa,
+    templates: tabMapping.templates || DEFAULT_TAB_NAMES.templates,
+  };
+
+  const tabsToEnsure = [
+    effectiveMapping.penduduk,
+    effectiveMapping.kewilayahan,
+    effectiveMapping.dusun,
+    effectiveMapping.rw,
+    effectiveMapping.arsipSurat,
+    effectiveMapping.profilDesa,
+    effectiveMapping.templates,
+  ].filter(Boolean) as string[];
+
+  await ensureSheetTabsExist(accessToken, spreadsheetId, tabsToEnsure);
+
   const rangesToClear = [
-    `${quoteSheetName(tabMapping.penduduk)}!A:AD`,
-    tabMapping.kewilayahan ? `${quoteSheetName(tabMapping.kewilayahan)}!A:Z` : null,
-    tabMapping.arsipSurat ? `${quoteSheetName(tabMapping.arsipSurat)}!A:Z` : null,
-    tabMapping.profilDesa ? `${quoteSheetName(tabMapping.profilDesa)}!A:B` : null,
+    `${quoteSheetName(effectiveMapping.penduduk)}!A:AD`,
+    effectiveMapping.kewilayahan
+      ? `${quoteSheetName(effectiveMapping.kewilayahan)}!A:L`
+      : null,
+    effectiveMapping.dusun ? `${quoteSheetName(effectiveMapping.dusun)}!A:H` : null,
+    effectiveMapping.rw ? `${quoteSheetName(effectiveMapping.rw)}!A:G` : null,
+    effectiveMapping.arsipSurat
+      ? `${quoteSheetName(effectiveMapping.arsipSurat)}!A:L`
+      : null,
+    effectiveMapping.profilDesa
+      ? `${quoteSheetName(effectiveMapping.profilDesa)}!A:B`
+      : null,
+    effectiveMapping.templates
+      ? `${quoteSheetName(effectiveMapping.templates)}!A:L`
+      : null,
   ].filter(Boolean) as string[];
 
   await googleFetch(
@@ -478,29 +757,50 @@ export async function pushToGoogleSheets(
 
   const data: { range: string; values: string[][] }[] = [
     {
-      range: `${quoteSheetName(tabMapping.penduduk)}!A1`,
+      range: `${quoteSheetName(effectiveMapping.penduduk)}!A1`,
       values: [PENDUDUK_HEADERS, ...payload.residents.map(residentToRow)],
     },
   ];
 
-  if (tabMapping.kewilayahan) {
+  if (effectiveMapping.kewilayahan) {
     data.push({
-      range: `${quoteSheetName(tabMapping.kewilayahan)}!A1`,
+      range: `${quoteSheetName(effectiveMapping.kewilayahan)}!A1`,
       values: [KEWILAYAHAN_HEADERS, ...payload.territories.map(territoryToRow)],
     });
   }
 
-  if (tabMapping.arsipSurat) {
+  if (effectiveMapping.dusun && payload.dusuns) {
     data.push({
-      range: `${quoteSheetName(tabMapping.arsipSurat)}!A1`,
+      range: `${quoteSheetName(effectiveMapping.dusun)}!A1`,
+      values: [DUSUN_HEADERS, ...payload.dusuns.map(dusunToRow)],
+    });
+  }
+
+  if (effectiveMapping.rw && payload.rws) {
+    data.push({
+      range: `${quoteSheetName(effectiveMapping.rw)}!A1`,
+      values: [RW_HEADERS, ...payload.rws.map(rwToRow)],
+    });
+  }
+
+  if (effectiveMapping.arsipSurat) {
+    data.push({
+      range: `${quoteSheetName(effectiveMapping.arsipSurat)}!A1`,
       values: [ARSIP_SURAT_HEADERS, ...payload.letters.map(letterToRow)],
     });
   }
 
-  if (tabMapping.profilDesa) {
+  if (effectiveMapping.profilDesa) {
     data.push({
-      range: `${quoteSheetName(tabMapping.profilDesa)}!A1`,
+      range: `${quoteSheetName(effectiveMapping.profilDesa)}!A1`,
       values: profileToRows(payload.profile),
+    });
+  }
+
+  if (effectiveMapping.templates && payload.templates) {
+    data.push({
+      range: `${quoteSheetName(effectiveMapping.templates)}!A1`,
+      values: [TEMPLATE_SURAT_HEADERS, ...payload.templates.map(templateToRow)],
     });
   }
 
@@ -518,6 +818,8 @@ export async function pushToGoogleSheets(
       }),
     }
   );
+
+  return effectiveMapping;
 }
 
 export async function pullFromGoogleSheets(
@@ -527,23 +829,92 @@ export async function pullFromGoogleSheets(
 ): Promise<{
   residents?: Resident[];
   territories?: TerritoryUnit[];
+  dusuns?: DusunUnit[];
+  rws?: RwUnit[];
   letters?: LetterRecord[];
+  templates?: LetterTemplate[];
   profilePatch?: Partial<VillageProfile>;
+  resolvedMapping: SheetTabMapping;
+  spreadsheetTitle: string;
 }> {
-  const ranges: string[] = [`${quoteSheetName(tabMapping.penduduk)}!A1:AD2000`];
-  if (tabMapping.kewilayahan) {
-    ranges.push(`${quoteSheetName(tabMapping.kewilayahan)}!A1:L500`);
+  // Always inspect actual tabs first so legacy or partially mapped sheets never fail batchGet
+  const meta = await fetchSpreadsheetMetadata(accessToken, spreadsheetId);
+  const resolved = resolveTabMapping(meta.sheetTitles, tabMapping);
+
+  type RangeKey =
+    | 'penduduk'
+    | 'kewilayahan'
+    | 'dusun'
+    | 'rw'
+    | 'arsipSurat'
+    | 'profilDesa'
+    | 'templates';
+
+  const queries: { key: RangeKey; range: string }[] = [];
+
+  if (resolved.penduduk && meta.sheetTitles.includes(resolved.penduduk)) {
+    queries.push({
+      key: 'penduduk',
+      range: `${quoteSheetName(resolved.penduduk)}!A1:AD2000`,
+    });
   }
-  if (tabMapping.arsipSurat) {
-    ranges.push(`${quoteSheetName(tabMapping.arsipSurat)}!A1:K1000`);
+  if (resolved.kewilayahan && meta.sheetTitles.includes(resolved.kewilayahan)) {
+    queries.push({
+      key: 'kewilayahan',
+      range: `${quoteSheetName(resolved.kewilayahan)}!A1:L500`,
+    });
   }
-  if (tabMapping.profilDesa) {
-    ranges.push(`${quoteSheetName(tabMapping.profilDesa)}!A1:B50`);
+  if (resolved.dusun && meta.sheetTitles.includes(resolved.dusun)) {
+    queries.push({
+      key: 'dusun',
+      range: `${quoteSheetName(resolved.dusun)}!A1:H200`,
+    });
+  }
+  if (resolved.rw && meta.sheetTitles.includes(resolved.rw)) {
+    queries.push({
+      key: 'rw',
+      range: `${quoteSheetName(resolved.rw)}!A1:G300`,
+    });
+  }
+  if (resolved.arsipSurat && meta.sheetTitles.includes(resolved.arsipSurat)) {
+    queries.push({
+      key: 'arsipSurat',
+      range: `${quoteSheetName(resolved.arsipSurat)}!A1:L1000`,
+    });
+  }
+  if (resolved.profilDesa && meta.sheetTitles.includes(resolved.profilDesa)) {
+    queries.push({
+      key: 'profilDesa',
+      range: `${quoteSheetName(resolved.profilDesa)}!A1:B50`,
+    });
+  }
+  if (resolved.templates && meta.sheetTitles.includes(resolved.templates)) {
+    queries.push({
+      key: 'templates',
+      range: `${quoteSheetName(resolved.templates)}!A1:L50`,
+    });
   }
 
+  const result: {
+    residents?: Resident[];
+    territories?: TerritoryUnit[];
+    dusuns?: DusunUnit[];
+    rws?: RwUnit[];
+    letters?: LetterRecord[];
+    templates?: LetterTemplate[];
+    profilePatch?: Partial<VillageProfile>;
+    resolvedMapping: SheetTabMapping;
+    spreadsheetTitle: string;
+  } = {
+    resolvedMapping: resolved,
+    spreadsheetTitle: meta.title,
+  };
+
+  if (queries.length === 0) return result;
+
   const params = new URLSearchParams();
-  for (const r of ranges) {
-    params.append('ranges', r);
+  for (const q of queries) {
+    params.append('ranges', q.range);
   }
 
   const res = await googleFetch(
@@ -554,59 +925,69 @@ export async function pullFromGoogleSheets(
   );
 
   const valueRanges: { range: string; values?: string[][] }[] = res.valueRanges || [];
-  const result: {
-    residents?: Resident[];
-    territories?: TerritoryUnit[];
-    letters?: LetterRecord[];
-    profilePatch?: Partial<VillageProfile>;
-  } = {};
 
-  let idx = 0;
-  const residentRows = valueRanges[idx++]?.values || [];
-  if (residentRows.length > 1) {
-    result.residents = residentRows
-      .slice(1)
-      .map((row, i) => rowToResident(row, i))
-      .filter((r): r is Resident => r !== null);
-  }
+  queries.forEach((query, idx) => {
+    const rows = valueRanges[idx]?.values || [];
+    if (rows.length <= 1) return;
 
-  if (tabMapping.kewilayahan) {
-    const territoryRows = valueRanges[idx++]?.values || [];
-    if (territoryRows.length > 1) {
-      result.territories = territoryRows
-        .slice(1)
-        .map((row, i) => rowToTerritory(row, i))
-        .filter((t): t is TerritoryUnit => t !== null);
-    }
-  }
-
-  if (tabMapping.arsipSurat) {
-    const letterRows = valueRanges[idx++]?.values || [];
-    if (letterRows.length > 1) {
-      result.letters = letterRows
-        .slice(1)
-        .map((row, i) => rowToLetter(row, i))
-        .filter((l): l is LetterRecord => l !== null);
-    }
-  }
-
-  if (tabMapping.profilDesa) {
-    const profileRows = valueRanges[idx++]?.values || [];
-    if (profileRows.length > 1) {
-      const patch: Record<string, string | number | undefined> = {};
-      for (const row of profileRows.slice(1)) {
-        if (row[0] && row[1] !== undefined) {
-          if (row[0] === 'kantorLat' || row[0] === 'kantorLng') {
-            const num = Number(row[1]);
-            patch[row[0]] = row[1] !== '' && !Number.isNaN(num) ? num : undefined;
-          } else {
-            patch[row[0]] = row[1];
+    switch (query.key) {
+      case 'penduduk':
+        result.residents = rows
+          .slice(1)
+          .map((row, i) => rowToResident(row, i))
+          .filter((r): r is Resident => r !== null);
+        break;
+      case 'kewilayahan':
+        result.territories = rows
+          .slice(1)
+          .map((row, i) => rowToTerritory(row, i))
+          .filter((t): t is TerritoryUnit => t !== null);
+        break;
+      case 'dusun':
+        result.dusuns = rows
+          .slice(1)
+          .map((row, i) => rowToDusun(row, i))
+          .filter((d): d is DusunUnit => d !== null);
+        break;
+      case 'rw':
+        result.rws = rows
+          .slice(1)
+          .map((row, i) => rowToRw(row, i))
+          .filter((r): r is RwUnit => r !== null);
+        break;
+      case 'arsipSurat':
+        result.letters = rows
+          .slice(1)
+          .map((row, i) => rowToLetter(row, i))
+          .filter((l): l is LetterRecord => l !== null);
+        break;
+      case 'templates':
+        result.templates = rows
+          .slice(1)
+          .map((row) => rowToTemplate(row))
+          .filter((t): t is LetterTemplate => t !== null);
+        break;
+      case 'profilDesa': {
+        const patch: Record<string, string | number | undefined> = {};
+        for (const row of rows.slice(1)) {
+          if (row[0] && row[1] !== undefined) {
+            if (row[0] === 'kantorLat' || row[0] === 'kantorLng') {
+              const num = Number(row[1]);
+              patch[row[0]] = row[1] !== '' && !Number.isNaN(num) ? num : undefined;
+            } else if (row[0] === 'logoPemdaUrl') {
+              if (row[1].trim()) {
+                patch[row[0]] = row[1];
+              }
+            } else {
+              patch[row[0]] = row[1];
+            }
           }
         }
+        result.profilePatch = patch as Partial<VillageProfile>;
+        break;
       }
-      result.profilePatch = patch as Partial<VillageProfile>;
     }
-  }
+  });
 
   return result;
 }
