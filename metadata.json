@@ -1,0 +1,6 @@
+{
+  "name": "SIMDESA — Sistem Data Penduduk & Administrasi Desa",
+  "description": "Aplikasi pengelolaan data penduduk desa, administrasi surat otomatis, statistik kependudukan, kewilayahan, dan sinkronisasi real-time Google Sheets & Google Drive.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
