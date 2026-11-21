@@ -37,6 +37,7 @@ interface DashboardViewProps {
   rws?: RwUnit[];
   territories: TerritoryUnit[];
   letters: LetterRecord[];
+  googleUserEmail?: string | null;
   isGoogleConnected: boolean;
   connectedSpreadsheetTitle: string | null;
   lastSyncedAt: string | null;
@@ -55,6 +56,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   rws = [],
   territories,
   letters,
+  googleUserEmail,
   isGoogleConnected,
   connectedSpreadsheetTitle,
   lastSyncedAt,
@@ -655,7 +657,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </h3>
                 <p className="text-xs text-slate-500">
                   {isGoogleConnected
-                    ? 'Akun Google Workspace terhubung'
+                    ? `Terhubung${googleUserEmail ? ` (${googleUserEmail})` : ''}`
+                    : googleUserEmail
+                    ? `Akun login: ${googleUserEmail}`
                     : 'Belum terhubung ke Google Workspace'}
                 </p>
               </div>
@@ -666,10 +670,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <span className="text-slate-500">Status Koneksi</span>
                 <span
                   className={`font-semibold ${
-                    isGoogleConnected ? 'text-emerald-700' : 'text-amber-700'
+                    isGoogleConnected
+                      ? 'text-emerald-700'
+                      : googleUserEmail
+                      ? 'text-teal-700'
+                      : 'text-amber-700'
                   }`}
                 >
-                  {isGoogleConnected ? 'Terhubung' : 'Perlu Masuk Akun Google'}
+                  {isGoogleConnected
+                    ? 'Aktif'
+                    : googleUserEmail
+                    ? 'Akun Login · Perlu Aktivasi Sesi'
+                    : 'Perlu Masuk Akun Google'}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-2">
@@ -692,18 +704,28 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             <p className="mt-4 text-xs leading-relaxed text-slate-600">
-              Hubungkan spreadsheet Google Sheets desa untuk menyinkronkan data warga,
-              kewilayahan, dan arsip surat secara real-time lintas perangkat desa.
+              {googleUserEmail && !isGoogleConnected
+                ? 'Akun Google Anda tetap login setelah halaman dimuat ulang. Klik tombol di bawah untuk menyegarkan sesi sinkronisasi Google Sheets.'
+                : 'Hubungkan spreadsheet Google Sheets desa untuk menyinkronkan data warga, kewilayahan, dan arsip surat secara real-time lintas perangkat desa.'}
             </p>
           </div>
 
           <div className="mt-6 flex flex-col gap-2.5">
-            {!isGoogleConnected ? (
+            {!isGoogleConnected && !googleUserEmail ? (
               <GoogleSignInButton
                 onClick={onGoogleLogin}
                 label="Sign in with Google"
                 className="w-full"
               />
+            ) : !isGoogleConnected && googleUserEmail ? (
+              <button
+                type="button"
+                onClick={onGoogleLogin}
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-4 py-2.5 text-xs font-medium text-white hover:bg-teal-800"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Aktifkan Sesi Sync
+              </button>
             ) : (
               <div className="flex flex-wrap gap-2">
                 <button

@@ -38,6 +38,7 @@ import {
   INITIAL_VILLAGE_PROFILE,
 } from './data/seedData';
 import {
+  clearCachedToken,
   getAccessToken,
   googleSignIn,
   initAuth,
@@ -76,6 +77,7 @@ const STORAGE_KEYS = {
   templates: 'simdesa_templates_v1',
   letters: 'simdesa_letters_v1',
   spreadsheetId: 'simdesa_spreadsheet_id_v1',
+  spreadsheetMeta: 'simdesa_spreadsheet_meta_v1',
   tabMapping: 'simdesa_tab_mapping_v1',
   autoSync: 'simdesa_autosync_v1',
 };
@@ -147,7 +149,9 @@ export default function App() {
     localStorage.getItem(STORAGE_KEYS.spreadsheetId)
   );
   const [connectedSpreadsheet, setConnectedSpreadsheet] =
-    useState<SpreadsheetMetadata | null>(null);
+    useState<SpreadsheetMetadata | null>(() =>
+      loadJson<SpreadsheetMetadata | null>(STORAGE_KEYS.spreadsheetMeta, null)
+    );
   const [tabMapping, setTabMapping] = useState<SheetTabMapping>(() =>
     loadJson(STORAGE_KEYS.tabMapping, {
       penduduk: 'Penduduk',
@@ -239,6 +243,21 @@ export default function App() {
     localStorage.setItem(STORAGE_KEYS.autoSync, String(autoSyncEnabled));
   }, [autoSyncEnabled]);
 
+  useEffect(() => {
+    try {
+      if (connectedSpreadsheet) {
+        localStorage.setItem(
+          STORAGE_KEYS.spreadsheetMeta,
+          JSON.stringify(connectedSpreadsheet)
+        );
+      } else {
+        localStorage.removeItem(STORAGE_KEYS.spreadsheetMeta);
+      }
+    } catch {
+      // ignore storage error
+    }
+  }, [connectedSpreadsheet]);
+
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage((cur) => (cur === msg ? null : cur)), 3500);
@@ -321,16 +340,19 @@ export default function App() {
     return () => unsubscribe();
   }, [loadDriveFilesAndMeta]);
 
-  const handleGoogleSignIn = async () => {
+  const handleGoogleSignIn = async (forceAccountSelect = false) => {
     setIsWorkspaceBusy(true);
     setWorkspaceError(null);
     try {
-      const result = await googleSignIn();
+      const result = await googleSignIn({
+        loginHint: !forceAccountSelect ? googleUser?.email || undefined : undefined,
+        forceAccountSelect: forceAccountSelect || !googleUser,
+      });
       if (result) {
         setGoogleUser(result.user);
         setNeedsAuth(false);
         await loadDriveFilesAndMeta(result.accessToken);
-        showToast('Berhasil terhubung dengan Google Sheets & Google Drive.');
+        showToast('Sesi Google Sheets & Drive aktif.');
       }
     } catch (err) {
       const msg =
@@ -338,24 +360,44 @@ export default function App() {
           ? err.message
           : 'Gagal masuk dengan akun Google. Pastikan pop-up tidak diblokir.';
       setWorkspaceError(msg);
+      showToast(msg);
     } finally {
       setIsWorkspaceBusy(false);
     }
   };
+
+  const ensureWorkspaceToken = useCallback(async (): Promise<string | null> => {
+    const existing = await getAccessToken();
+    if (existing) return existing;
+
+    const result = await googleSignIn({
+      loginHint: googleUser?.email || undefined,
+      forceAccountSelect: !googleUser,
+    });
+    if (result) {
+      setGoogleUser(result.user);
+      setNeedsAuth(false);
+      await loadDriveFilesAndMeta(result.accessToken);
+      return result.accessToken;
+    }
+    return null;
+  }, [googleUser, loadDriveFilesAndMeta]);
 
   const handleGoogleSignOut = async () => {
     await logout();
     setGoogleUser(null);
     setNeedsAuth(true);
     setConnectedSpreadsheet(null);
+    setSavedSpreadsheetId(null);
+    localStorage.removeItem(STORAGE_KEYS.spreadsheetId);
+    localStorage.removeItem(STORAGE_KEYS.spreadsheetMeta);
     setDriveSpreadsheets([]);
     setArchivedDriveFiles([]);
-    setAutoSyncEnabled(false);
-    showToast('Akun Google telah diputus.');
+    showToast('Akun Google telah keluar.');
   };
 
   const handleSelectSpreadsheet = async (spreadsheetId: string) => {
-    const token = await getAccessToken();
+    const token = await ensureWorkspaceToken();
     if (!token) {
       setNeedsAuth(true);
       return;
@@ -438,7 +480,16 @@ export default function App() {
 
   const handlePullFromSheets = useCallback(
     async (silent = false) => {
-      const token = await getAccessToken();
+      let token = await getAccessToken();
+      if (!token && !silent) {
+        try {
+          token = await ensureWorkspaceToken();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Gagal menyegarkan sesi Google.';
+          setWorkspaceError(msg);
+          return;
+        }
+      }
       if (!token || !connectedSpreadsheet) {
         if (!silent) setNeedsAuth(true);
         return;
@@ -499,15 +550,24 @@ export default function App() {
           showToast('Data berhasil ditarik dari Google Sheets.');
         }
       } catch (err) {
+        const status = (err as { status?: number })?.status;
+        if (status === 401) {
+          clearCachedToken();
+          setNeedsAuth(true);
+        }
         const msg =
-          err instanceof Error ? err.message : 'Gagal menarik data dari Google Sheets.';
+          status === 401
+            ? 'Sesi Google Sheets berakhir. Klik "Aktifkan Sesi Sync" untuk melanjutkan.'
+            : err instanceof Error
+            ? err.message
+            : 'Gagal menarik data dari Google Sheets.';
         if (!silent) setWorkspaceError(msg);
         addSyncLog('pull', msg, 'error');
       } finally {
         if (!silent) setIsWorkspaceBusy(false);
       }
     },
-    [connectedSpreadsheet, tabMapping, addSyncLog, showToast]
+    [connectedSpreadsheet, tabMapping, ensureWorkspaceToken, addSyncLog, showToast]
   );
 
   // Real-time auto-sync polling (read-only pull every 20s when enabled)
@@ -532,7 +592,7 @@ export default function App() {
       confirmLabel: 'Bagikan Akses',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -579,7 +639,7 @@ export default function App() {
       confirmLabel: 'Buat & Isi Spreadsheet',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -646,7 +706,7 @@ export default function App() {
       confirmLabel: 'Konfirmasi Sinkronisasi',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -668,6 +728,11 @@ export default function App() {
           );
           showToast('Data berhasil disinkronkan ke Google Sheets.');
         } catch (err) {
+          const status = (err as { status?: number })?.status;
+          if (status === 401) {
+            clearCachedToken();
+            setNeedsAuth(true);
+          }
           const msg =
             err instanceof Error
               ? err.message
@@ -693,7 +758,7 @@ export default function App() {
       confirmLabel: 'Unggah ke Google Drive',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -744,7 +809,7 @@ export default function App() {
       confirmLabel: 'Simpan Logo ke Drive',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -780,7 +845,7 @@ export default function App() {
       confirmLabel: 'Simpan ke Drive',
       variant: 'primary',
       action: async () => {
-        const token = await getAccessToken();
+        const token = await ensureWorkspaceToken();
         if (!token) {
           setNeedsAuth(true);
           return;
@@ -1047,23 +1112,54 @@ export default function App() {
 
         {/* Bottom Google Connection Box */}
         <div className="border-t border-slate-200 p-4">
-          {needsAuth ? (
+          {!googleUser ? (
             <div className="space-y-2.5">
               <p className="text-[11px] leading-relaxed text-slate-500">
                 Hubungkan akun Google untuk sinkronisasi Sheets real-time.
               </p>
               <GoogleSignInButton
-                onClick={handleGoogleSignIn}
+                onClick={() => handleGoogleSignIn(true)}
                 disabled={isWorkspaceBusy}
                 label="Sign in with Google"
                 className="w-full"
               />
             </div>
+          ) : needsAuth ? (
+            <div className="space-y-2">
+              <div className="text-xs">
+                <p className="truncate font-medium text-slate-900">
+                  {googleUser.displayName || googleUser.email || 'Akun Tersimpan'}
+                </p>
+                <p className="truncate text-[11px] text-slate-500">
+                  {connectedSpreadsheet
+                    ? connectedSpreadsheet.title
+                    : googleUser.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleGoogleSignIn(false)}
+                disabled={isWorkspaceBusy}
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-teal-800"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${isWorkspaceBusy ? 'animate-spin' : ''}`}
+                />
+                Aktifkan Sesi Sync
+              </button>
+              <button
+                type="button"
+                onClick={handleGoogleSignOut}
+                className="w-full text-center text-[11px] text-slate-500 hover:text-slate-800"
+              >
+                Keluar / Ganti Akun
+              </button>
+            </div>
           ) : (
             <div className="space-y-2">
               <div className="text-xs">
                 <p className="truncate font-medium text-slate-900">
-                  {googleUser?.displayName || 'Google Terhubung'}
+                  {googleUser.displayName || 'Google Terhubung'}
                 </p>
                 <p className="truncate text-[11px] text-slate-500">
                   {connectedSpreadsheet
@@ -1137,20 +1233,47 @@ export default function App() {
             </nav>
 
             <div className="border-t border-slate-200 p-4">
-              {needsAuth ? (
+              {!googleUser ? (
                 <GoogleSignInButton
                   onClick={() => {
                     setMobileMenuOpen(false);
-                    handleGoogleSignIn();
+                    handleGoogleSignIn(true);
                   }}
                   disabled={isWorkspaceBusy}
                   label="Sign in with Google"
                   className="w-full"
                 />
+              ) : needsAuth ? (
+                <div className="space-y-2">
+                  <p className="truncate text-xs font-medium text-slate-900">
+                    {googleUser.displayName || googleUser.email || 'Akun Tersimpan'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      handleGoogleSignIn(false);
+                    }}
+                    className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-teal-700 px-3 py-2 text-xs font-medium text-white"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Aktifkan Sesi Sync
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      handleGoogleSignOut();
+                    }}
+                    className="w-full text-center text-[11px] text-slate-500"
+                  >
+                    Keluar / Ganti Akun
+                  </button>
+                </div>
               ) : (
                 <div className="space-y-2">
                   <p className="truncate text-xs font-medium text-slate-900">
-                    {googleUser?.displayName || 'Google Terhubung'}
+                    {googleUser.displayName || 'Google Terhubung'}
                   </p>
                   <button
                     type="button"
@@ -1196,12 +1319,22 @@ export default function App() {
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             <PWAInstallButton compact />
-            {needsAuth ? (
+            {!googleUser ? (
               <GoogleSignInButton
-                onClick={handleGoogleSignIn}
+                onClick={() => handleGoogleSignIn(true)}
                 disabled={isWorkspaceBusy}
                 label="Sign in"
               />
+            ) : needsAuth ? (
+              <button
+                type="button"
+                onClick={() => handleGoogleSignIn(false)}
+                disabled={isWorkspaceBusy}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-medium text-teal-800 hover:bg-teal-100 whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isWorkspaceBusy ? 'animate-spin' : ''}`} />
+                Aktifkan Sync
+              </button>
             ) : (
               <button
                 type="button"
@@ -1227,6 +1360,7 @@ export default function App() {
               rws={rws}
               territories={territories}
               letters={letters}
+              googleUserEmail={googleUser?.email || null}
               isGoogleConnected={!needsAuth}
               connectedSpreadsheetTitle={connectedSpreadsheet?.title || null}
               lastSyncedAt={lastSyncedAt}
@@ -1239,7 +1373,7 @@ export default function App() {
                 setActiveTab('penduduk');
                 setAddResidentTrigger((n) => n + 1);
               }}
-              onGoogleLogin={handleGoogleSignIn}
+              onGoogleLogin={() => handleGoogleSignIn(!googleUser)}
               onSyncNow={requestPushToSheets}
               onUploadLogoToDrive={requestUploadLogoToDrive}
             />
@@ -1348,7 +1482,7 @@ export default function App() {
               tabMapping={tabMapping}
               autoSyncEnabled={autoSyncEnabled}
               syncLogs={syncLogs}
-              onSignIn={handleGoogleSignIn}
+              onSignIn={() => handleGoogleSignIn(!googleUser)}
               onSignOut={handleGoogleSignOut}
               onRefreshDriveList={async (search) => {
                 const token = await getAccessToken();

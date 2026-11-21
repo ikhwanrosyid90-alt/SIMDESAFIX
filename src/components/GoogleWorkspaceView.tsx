@@ -101,6 +101,80 @@ export const GoogleWorkspaceView: React.FC<GoogleWorkspaceViewProps> = ({
     }
   };
 
+  if (!isGoogleConnected && user) {
+    return (
+      <div className="mx-auto max-w-2xl rounded-xl border border-slate-200 bg-white p-6 sm:p-8">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+          <div className="flex items-center gap-3.5">
+            {user.photoURL ? (
+              <img
+                src={user.photoURL}
+                alt={user.displayName || 'Akun Google'}
+                referrerPolicy="no-referrer"
+                className="h-11 w-11 rounded-full border border-slate-200 object-cover"
+              />
+            ) : (
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-teal-700 text-sm font-semibold text-white">
+                {(user.displayName || user.email || 'G')[0].toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-slate-900">
+                {user.displayName || 'Perangkat Desa'}
+              </p>
+              <p className="truncate text-xs text-slate-500">
+                {user.email} · Akun Tetap Login
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Ganti / Keluar Akun
+          </button>
+        </div>
+
+        <div className="mt-5 space-y-4 text-center sm:text-left">
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">
+              Aktifkan Kembali Sesi Sinkronisasi Google Sheets & Drive
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
+              Akun Google Anda tetap tersimpan setelah reload halaman. Demi keamanan browser, izin akses ke Google Sheets & Google Drive perlu disegarkan 1 klik untuk sesi ini.
+            </p>
+            {connectedSpreadsheet && (
+              <p className="mt-2 text-xs font-medium text-teal-800">
+                Spreadsheet tersambung: <strong>{connectedSpreadsheet.title}</strong>
+              </p>
+            )}
+          </div>
+
+          {errorMessage && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-700">
+              {errorMessage}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onSignIn}
+              disabled={isBusy}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-teal-700 px-5 py-2.5 text-xs font-medium text-white hover:bg-teal-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isBusy ? 'animate-spin' : ''}`} />
+              {isBusy ? 'Menyegarkan Sesi...' : 'Aktifkan Sesi Sync Sekarang'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!isGoogleConnected) {
     return (
       <div className="mx-auto max-w-2xl rounded-xl border border-slate-200 bg-white p-8 text-center">
